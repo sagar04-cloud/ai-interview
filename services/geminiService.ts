@@ -1,11 +1,12 @@
 import { GoogleGenAI, Type, Modality } from "@google/genai";
 import { InterviewQuestion, QuestionCategory, TechnicalSolution, StructuredFeedback, InterviewPrepResult, ValidationResult } from '../types';
 
-if (!process.env.API_KEY) {
-    throw new Error("API_KEY environment variable not set");
+const apiKey = process.env.API_KEY || "";
+if (!apiKey) {
+    console.error("Gemini API key is missing. Ensure GEMINI_API_KEY is set in your .env file.");
 }
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+const ai = new GoogleGenAI({ apiKey });
 
 // Helper to convert File to a Gemini-compatible FilePart object.
 const fileToGenerativePart = async (file: File) => {
@@ -124,26 +125,37 @@ const feedbackSchema = {
 };
 
 
-const parseAndValidateJSON = <T>(responseText: string, schemaKeys: (keyof T)[]): T => {
+const parseAndValidateJSON = <T>(response: any, schemaKeys: (keyof T)[]): T => {
+    let responseText = "";
     try {
-        const jsonText = responseText.trim();
-        // Handle cases where the AI might return an empty string or non-JSON content
-        if (!jsonText || !jsonText.startsWith('{') && !jsonText.startsWith('[')) {
-             throw new Error("AI returned non-JSON response.");
+        // Attempt to get text from various possible SDK response structures
+        if (typeof response.text === 'string') {
+            responseText = response.text;
+        } else if (typeof response.text === 'function') {
+            responseText = response.text();
+        } else if (response.candidates && response.candidates[0]?.content?.parts?.[0]?.text) {
+            responseText = response.candidates[0].content.parts[0].text;
+        } else {
+            responseText = JSON.stringify(response);
         }
+
+        const jsonText = responseText.trim();
+        if (!jsonText) throw new Error("Empty response from AI");
+
         const parsedData = JSON.parse(jsonText);
 
         for (const key of schemaKeys) {
             if (parsedData[key] === undefined) {
-                // Allow followUpQuestion to be optional
                 if (String(key) === 'followUpQuestion') continue;
-                throw new Error(`Invalid data structure from AI: missing key "${String(key)}".`);
+                throw new Error(`Missing key "${String(key)}"`);
             }
         }
         return parsedData as T;
     } catch (e: any) {
-        console.error("JSON parsing or validation failed:", e.message, "Raw Response:", responseText);
-        throw new Error("The AI returned a response in an unexpected format. Please try again.");
+        console.error("JSON Parsing Error:", e.message);
+        console.error("Raw Response Object:", response);
+        console.error("Extracted Text:", responseText);
+        throw new Error(`AI parse failed: ${e.message}`);
     }
 };
 
@@ -174,20 +186,15 @@ export const validateJobInput = async (jobRole: string, jobDescription: string):
                 systemInstruction,
                 responseMimeType: 'application/json',
                 responseSchema: validationSchema,
-                temperature: 0.2,
-                thinkingConfig: { thinkingBudget: 0 }
+                temperature: 0.1,
             },
         });
 
-        const parsed = JSON.parse(response.text.trim());
-        if (!['valid', 'improvable', 'invalid'].includes(parsed.status) || typeof parsed.reason !== 'string') {
-             throw new Error("AI returned an invalid validation structure.");
-        }
-        return parsed;
+        return parseAndValidateJSON<ValidationResult>(response, ['status', 'reason']);
 
     } catch (error) {
-        console.error("Error validating job input:", error);
-        return { status: 'valid', reason: "Validation check failed, proceeding anyway." };
+        console.error("Validation Error:", error);
+        return { status: 'valid', reason: "Automatic validation skipped." };
     }
 };
 
@@ -209,8 +216,9 @@ export const generateInterviewQuestions = async (jobRole: string, jobDescription
         ---
         Please generate the full interview preparation package based on this information.
     `;
-    
+
     try {
+        console.log("Generating interview questions...");
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',
             contents: prompt,
@@ -221,12 +229,12 @@ export const generateInterviewQuestions = async (jobRole: string, jobDescription
                 temperature: 0.7,
             },
         });
-        
-        return parseAndValidateJSON<InterviewPrepResult>(response.text, ['questions', 'companyName', 'approachGuide']);
 
-    } catch (error) {
-        console.error("Error generating interview questions:", error);
-        throw new Error("Could not generate interview questions. This could be due to a network issue or a content safety filter on your input. Please check your job description for sensitive terms or try again later.");
+        return parseAndValidateJSON<InterviewPrepResult>(response, ['questions', 'companyName', 'approachGuide']);
+
+    } catch (error: any) {
+        console.error("Detailed Generation Error:", error);
+        throw new Error(error.message || "Could not generate interview questions. Please check your network or input.");
     }
 };
 
@@ -236,7 +244,7 @@ export const generateTechnicalSolution = async (
     level: string,
     file?: File | null
 ): Promise<TechnicalSolution> => {
-    
+
     const systemInstruction = `You are a world-class software engineer and expert problem solver, equivalent to a principal engineer at a top tech company. Your task is to provide an optimal and production-quality solution to the given technical problem, specifically tailored for a developer with a ${level.toUpperCase()} skill level. You must provide a step-by-step explanation and the complete, runnable code in the specified language. If a file is provided, analyze its contents as part of the problem description.
 
 - The 'code' field must contain ONLY pure, runnable code.
@@ -253,16 +261,16 @@ export const generateTechnicalSolution = async (
         Please provide a detailed explanation and the complete code solution tailored for this skill level.
     `;
 
-    const content: {parts: any[]} = { parts: [{ text: textPrompt }] };
+    const content: { parts: any[] } = { parts: [{ text: textPrompt }] };
     if (file) {
         const filePart = await fileToGenerativePart(file);
         content.parts.unshift(filePart);
     }
-    
+
     try {
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',
-            contents: content,
+            contents: content.parts[1] ? content : (content.parts[0]?.text || ""),
             config: {
                 systemInstruction,
                 responseMimeType: 'application/json',
@@ -283,12 +291,13 @@ export const transcribeAudio = async (audioFile: File): Promise<string> => {
 
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',
-            contents: {
+            contents: [{
+                role: 'user',
                 parts: [
                     audioPart,
-                    { text: "Transcribe this audio recording of a person answering an interview question. Provide only the text of their answer, without any introductory phrases like 'The user said:'." }
+                    { text: "Transcribe this audio recording of a person answering an interview question. Provide only the text." }
                 ]
-            },
+            }],
         });
 
         return response.text.trim();
@@ -301,7 +310,7 @@ export const transcribeAudio = async (audioFile: File): Promise<string> => {
 
 export const generateAnswerFeedback = async (question: string, answer: string, jobRole: string): Promise<StructuredFeedback> => {
     const systemInstruction = `You are an expert career coach and interviewer for the role of '${jobRole}'. Your task is to provide structured, constructive feedback on a candidate's answer to an interview question. Analyze the answer based on clarity, structure (e.g., STAR method), and relevance to the role. Provide ratings from 1-5, actionable improvement points, and a relevant follow-up question in the required JSON format.`;
-    
+
     const prompt = `
         Interview Question: "${question}"
         
@@ -318,7 +327,7 @@ export const generateAnswerFeedback = async (question: string, answer: string, j
                 systemInstruction,
                 responseMimeType: 'application/json',
                 responseSchema: feedbackSchema,
-                temperature: 0.6,
+                temperature: 0.5,
             }
         });
         return parseAndValidateJSON<StructuredFeedback>(response.text, ['clarity', 'structure', 'relevance', 'overallImpression', 'improvementPoints', 'followUpQuestion']);
@@ -331,7 +340,7 @@ export const generateAnswerFeedback = async (question: string, answer: string, j
 export const textToSpeech = async (text: string): Promise<string> => {
     try {
         const response = await ai.models.generateContent({
-            model: "gemini-2.5-flash-preview-tts",
+            model: "gemini-2.5-flash",
             contents: [{ parts: [{ text: `Read this interview question clearly and professionally: "${text}"` }] }],
             config: {
                 responseModalities: [Modality.AUDIO],
