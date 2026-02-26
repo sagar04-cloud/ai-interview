@@ -133,6 +133,4 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ---
 
-<div align="center">
-  Developed with ❤️ using Gemini AI
-</div>
+
