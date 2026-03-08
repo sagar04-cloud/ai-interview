@@ -278,7 +278,7 @@ export const generateTechnicalSolution = async (
                 temperature: 0.3,
             }
         });
-        return parseAndValidateJSON<TechnicalSolution>(response.text, ['explanation', 'code']);
+        return parseAndValidateJSON<TechnicalSolution>(response, ['explanation', 'code']);
     } catch (error) {
         console.error("Error generating technical solution:", error);
         throw new Error("The AI failed to generate a solution. Your request might have been blocked for safety reasons, or there could be a temporary network issue. Please review your problem description and try again.");
@@ -330,7 +330,7 @@ export const generateAnswerFeedback = async (question: string, answer: string, j
                 temperature: 0.5,
             }
         });
-        return parseAndValidateJSON<StructuredFeedback>(response.text, ['clarity', 'structure', 'relevance', 'overallImpression', 'improvementPoints', 'followUpQuestion']);
+        return parseAndValidateJSON<StructuredFeedback>(response, ['clarity', 'structure', 'relevance', 'overallImpression', 'improvementPoints', 'followUpQuestion']);
     } catch (error) {
         console.error("Error generating structured answer feedback:", error);
         throw new Error("Failed to generate feedback for your answer. There might be a temporary issue with the AI service. Please try again.");

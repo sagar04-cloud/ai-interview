@@ -1,6 +1,5 @@
 
-  
-  # 🤖 AI Interview Prep
+# 🤖 AI Interview Prep
   
   **Transform your interview preparation with the power of Gemini 2.5 AI.**
   
