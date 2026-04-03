@@ -12,11 +12,34 @@ import CodeBlock from './components/CodeBlock';
 import ConfirmationModal from './components/ConfirmationModal';
 import AlertModal from './components/AlertModal';
 import MockInterviewModal from './components/MockInterviewModal';
-import { BriefcaseIcon, LightbulbIcon, BookmarkIcon, TrashIcon, DownloadIcon, ChevronDownIcon, EyeIcon, MicrophoneIcon, BuildingIcon, ArrowUpDownIcon } from './components/Icons';
+import Login from './components/Login';
+import Profile from './components/Profile';
+import { BriefcaseIcon, LightbulbIcon, BookmarkIcon, TrashIcon, DownloadIcon, ChevronDownIcon, EyeIcon, MicrophoneIcon, BuildingIcon, ArrowUpDownIcon, UserIcon } from './components/Icons';
+
+import { auth, db } from './firebase';
+import { onAuthStateChanged, signOut, User } from 'firebase/auth';
+import { ref, get, push, remove, query, orderByChild, set } from 'firebase/database';
 
 type Theme = 'light' | 'dark';
 
 const App: React.FC = () => {
+    // Auth State
+    const [user, setUser] = useState<User | null>(null);
+    const [authLoading, setAuthLoading] = useState(true);
+
+    useEffect(() => {
+        const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+            setUser(currentUser);
+            setAuthLoading(false);
+        });
+        return () => unsubscribe();
+    }, []);
+
+    const handleLogout = async () => {
+        await signOut(auth);
+        setActiveView(AppView.InterviewPrep);
+    };
+
     // Core App State
     const [theme, setTheme] = useState<Theme>('dark');
     const [activeView, setActiveView] = useState<AppView>(AppView.InterviewPrep);
@@ -39,10 +62,9 @@ const App: React.FC = () => {
     const [isExplanationOpen, setIsExplanationOpen] = useState(false);
     const solutionRef = useRef<HTMLDivElement>(null);
 
-
     // Saved Sessions State
     const [savedSessions, setSavedSessions] = useState<SavedSession[]>([]);
-    const [sessionToDelete, setSessionToDelete] = useState<number | null>(null);
+    const [sessionToDelete, setSessionToDelete] = useState<string | null>(null);
     const [sortOrder, setSortOrder] = useState<'newest' | 'oldest'>('newest');
     
     // Modal State
@@ -57,6 +79,7 @@ const App: React.FC = () => {
         { id: AppView.InterviewPrep, label: 'Interview Prep', icon: BriefcaseIcon },
         { id: AppView.ProblemSolver, label: 'Problem Solver', icon: LightbulbIcon },
         { id: AppView.SavedSessions, label: 'Saved Sessions', icon: BookmarkIcon },
+        { id: AppView.Profile, label: 'Profile', icon: UserIcon },
     ], []);
 
     const sortedSessions = useMemo(() => {
@@ -64,7 +87,6 @@ const App: React.FC = () => {
         sessionsToSort.sort((a, b) => {
             const dateA = new Date(a.createdAt).getTime();
             const dateB = new Date(b.createdAt).getTime();
-            // FIX: Corrected a typo in the sort logic. `b` was used instead of `dateB`.
             return sortOrder === 'newest' ? dateB - dateA : dateA - dateB;
         });
         return sessionsToSort;
@@ -88,20 +110,33 @@ const App: React.FC = () => {
         localStorage.setItem('theme', theme);
     }, [theme]);
 
-    // Load saved sessions from local storage on mount
+    // Load saved sessions from Realtime Database on mount/user change
     useEffect(() => {
-        try {
-            const storedSessions = localStorage.getItem('interviewSessions');
-            if (storedSessions) {
-                setSavedSessions(JSON.parse(storedSessions));
+        const fetchSessions = async () => {
+            if (!user) {
+                setSavedSessions([]);
+                return;
             }
-        } catch (e) {
-            console.error("Failed to parse saved sessions from localStorage", e);
-            // If parsing fails, clear the corrupted data to prevent future errors
-            localStorage.removeItem('interviewSessions');
-            setSavedSessions([]);
-        }
-    }, []);
+            try {
+                const sessionsRef = query(ref(db, `users/${user.uid}/sessions`), orderByChild('createdAt'));
+                const snapshot = await get(sessionsRef);
+                
+                const sessions: SavedSession[] = [];
+                if (snapshot.exists()) {
+                    snapshot.forEach((childSnapshot) => {
+                        sessions.push({ id: childSnapshot.key as string, ...childSnapshot.val() } as SavedSession);
+                    });
+                    // Sort newest first
+                    sessions.reverse();
+                }
+                
+                setSavedSessions(sessions);
+            } catch (e) {
+                console.error("Failed to parse saved sessions from realtime database", e);
+            }
+        };
+        fetchSessions();
+    }, [user]);
 
     // Auto-scroll to solution
     useEffect(() => {
@@ -200,10 +235,10 @@ const App: React.FC = () => {
         }
     };
 
-    const handleSaveSession = useCallback(() => {
-        if (!interviewPrepData) return;
-        const newSession: SavedSession = {
-            id: Date.now(),
+    const handleSaveSession = useCallback(async () => {
+        if (!interviewPrepData || !user) return;
+        
+        const sessionData = {
             jobRole,
             experienceLevel,
             companyName: companyName, // Use the state which user can control
@@ -211,11 +246,23 @@ const App: React.FC = () => {
             questions: interviewPrepData.questions,
             approachGuide: interviewPrepData.approachGuide,
         };
-        const updatedSessions = [newSession, ...savedSessions];
-        setSavedSessions(updatedSessions);
-        localStorage.setItem('interviewSessions', JSON.stringify(updatedSessions));
-        setActiveView(AppView.SavedSessions);
-    }, [jobRole, companyName, interviewPrepData, savedSessions, experienceLevel]);
+
+        try {
+            const sessionsRef = ref(db, `users/${user.uid}/sessions`);
+            const newSessionRef = push(sessionsRef);
+            await set(newSessionRef, sessionData);
+            
+            const newSession: SavedSession = {
+                id: newSessionRef.key as string,
+                ...sessionData
+            };
+            setSavedSessions([newSession, ...savedSessions]);
+            setActiveView(AppView.SavedSessions);
+        } catch (error) {
+            console.error("Error saving session: ", error);
+            setAlertInfo({ title: "Save Failed", message: "Could not save your session to the database." });
+        }
+    }, [jobRole, companyName, interviewPrepData, savedSessions, experienceLevel, user]);
 
     const handleViewSession = (session: SavedSession) => {
         setJobRole(session.jobRole);
@@ -230,16 +277,23 @@ const App: React.FC = () => {
         setActiveView(AppView.InterviewPrep);
     };
 
-    const handleDeleteSession = (id: number) => {
+    const handleDeleteSession = (id: string) => {
         setSessionToDelete(id);
     };
 
-    const confirmDeleteSession = () => {
-        if (sessionToDelete !== null) {
-            const updatedSessions = savedSessions.filter(s => s.id !== sessionToDelete);
-            setSavedSessions(updatedSessions);
-            localStorage.setItem('interviewSessions', JSON.stringify(updatedSessions));
-            setSessionToDelete(null);
+    const confirmDeleteSession = async () => {
+        if (sessionToDelete !== null && user) {
+            try {
+                const sessionRef = ref(db, `users/${user.uid}/sessions/${sessionToDelete}`);
+                await remove(sessionRef);
+                const updatedSessions = savedSessions.filter(s => s.id !== sessionToDelete);
+                setSavedSessions(updatedSessions);
+                setSessionToDelete(null);
+            } catch (error) {
+                 console.error("Error deleting session: ", error);
+                 setAlertInfo({ title: "Delete Failed", message: "Could not delete the session from the database." });
+                 setSessionToDelete(null);
+            }
         }
     };
 
@@ -515,10 +569,37 @@ const App: React.FC = () => {
                             )}
                         </div>
                     );
+                case AppView.Profile:
+                    return (
+                        <Profile 
+                            user={user!} 
+                            onLogout={handleLogout} 
+                        />
+                    );
             }
         }
         return <div className="space-y-8 animate-fade-in">{viewContent()}</div>
     };
+
+    if (authLoading) {
+        return (
+            <div className="min-h-screen flex items-center justify-center bg-base-200 dark:bg-dark-base-200 text-base-content dark:text-dark-content font-sans">
+                <LoadingSpinner message="Checking authentication..." />
+            </div>
+        );
+    }
+
+    if (!user) {
+        return (
+            <div className="min-h-screen flex flex-col bg-base-200 dark:bg-dark-base-200 text-base-content dark:text-dark-content font-sans">
+                <Header theme={theme} setTheme={setTheme} />
+                <main className="flex-grow container mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
+                    <Login />
+                </main>
+                <Footer />
+            </div>
+        );
+    }
 
     return (
         <div className="min-h-screen flex flex-col bg-base-200 dark:bg-dark-base-200 text-base-content dark:text-dark-content font-sans">

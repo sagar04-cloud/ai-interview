@@ -24,7 +24,7 @@ export interface InterviewPrepResult {
 }
 
 export interface SavedSession {
-  id: number;
+  id: string;
   jobRole: string;
   createdAt: string;
   questions: InterviewQuestion[];
@@ -37,6 +37,7 @@ export enum AppView {
   InterviewPrep = 'InterviewPrep',
   ProblemSolver = 'ProblemSolver',
   SavedSessions = 'SavedSessions',
+  Profile = 'Profile',
 }
 
 export interface StructuredFeedback {
