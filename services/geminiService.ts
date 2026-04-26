@@ -1,23 +1,12 @@
 import { GoogleGenAI, Type, Modality } from "@google/genai";
 import { InterviewQuestion, QuestionCategory, TechnicalSolution, StructuredFeedback, InterviewPrepResult, ValidationResult } from '../types';
 
-let currentKeyIndex = 0;
+const apiKey = process.env.API_KEY || "";
+if (!apiKey) {
+    console.error("Gemini API key is missing. Ensure GEMINI_API_KEY is set in your .env file.");
+}
 
-const getAIClient = (): GoogleGenAI => {
-    const keysString = import.meta.env.VITE_GEMINI_API_KEYS || import.meta.env.VITE_GEMINI_API_KEY || "";
-    const keys = keysString.split(',').map((k: string) => k.trim()).filter(Boolean);
-
-    if (keys.length === 0) {
-        console.error("Gemini API key is missing. Ensure VITE_GEMINI_API_KEY is set in your .env file.");
-        return new GoogleGenAI({ apiKey: "" });
-    }
-
-    // Load balancer: rotate through available keys
-    const selectedKey = keys[currentKeyIndex];
-    currentKeyIndex = (currentKeyIndex + 1) % keys.length;
-
-    return new GoogleGenAI({ apiKey: selectedKey });
-};
+const ai = new GoogleGenAI({ apiKey });
 
 // Helper to convert File to a Gemini-compatible FilePart object.
 const fileToGenerativePart = async (file: File) => {
@@ -136,66 +125,6 @@ const feedbackSchema = {
 };
 
 
-const formatApiError = (error: any): string => {
-    console.error("Formatting API Error:", error);
-    
-    // Check if error is a JSON string (sometimes happens with SDK)
-    if (typeof error.message === 'string' && error.message.includes('{')) {
-        try {
-            const parsed = JSON.parse(error.message);
-            if (parsed.error && parsed.error.message) {
-                if (parsed.error.code === 503 || parsed.error.status === 'UNAVAILABLE') {
-                    return "The AI model is currently overloaded due to high demand. Please wait a moment and try again.";
-                }
-                return parsed.error.message;
-            }
-        } catch (e) {
-            // Not JSON, continue
-        }
-    }
-
-    // Direct check on error object properties
-    const status = error.status || (error.error && error.error.status);
-    const code = error.code || (error.error && error.error.code);
-    const msg = error.message || (error.error && error.error.message);
-
-    if (status === 'UNAVAILABLE' || code === 503) {
-        return "The AI model is currently overloaded due to high demand. Please wait a moment and try again.";
-    }
-
-    if (status === 'RESOURCE_EXHAUSTED' || code === 429) {
-        return "You've reached the rate limit for the AI service. Please wait a minute before trying again.";
-    }
-
-    if (msg) return msg;
-
-    return "An unexpected error occurred while communicating with the AI. Please try again.";
-};
-
-const withRetry = async <T>(fn: () => Promise<T>, maxRetries = 4, delay = 2000): Promise<T> => {
-    let lastError: any;
-    for (let i = 0; i < maxRetries + 1; i++) {
-        try {
-            return await fn();
-        } catch (error: any) {
-            lastError = error;
-            const errStr = typeof error.message === 'string' ? error.message : JSON.stringify(error);
-            const is503 = errStr.includes('503') || errStr.includes('UNAVAILABLE') || errStr.includes('high demand');
-            const is429 = errStr.includes('429') || errStr.includes('RESOURCE_EXHAUSTED') || errStr.includes('quota');
-
-            if (i < maxRetries && (is503 || is429)) {
-                const waitTime = delay * Math.pow(2, i);
-                console.warn(`Retry ${i + 1}/${maxRetries} after ${waitTime}ms...`);
-                await new Promise(resolve => setTimeout(resolve, waitTime));
-                continue;
-            }
-            throw error;
-        }
-    }
-    throw lastError;
-};
-
-
 const parseAndValidateJSON = <T>(response: any, schemaKeys: (keyof T)[]): T => {
     let responseText = "";
     try {
@@ -213,15 +142,7 @@ const parseAndValidateJSON = <T>(response: any, schemaKeys: (keyof T)[]): T => {
         const jsonText = responseText.trim();
         if (!jsonText) throw new Error("Empty response from AI");
 
-        // Clean potentially problematic characters from JSON (like trailing commas or markdown backticks)
-        let cleanedJson = jsonText;
-        if (cleanedJson.startsWith('```json')) {
-            cleanedJson = cleanedJson.replace(/^```json\n?/, '').replace(/\n?```$/, '');
-        } else if (cleanedJson.startsWith('```')) {
-            cleanedJson = cleanedJson.replace(/^```\n?/, '').replace(/\n?```$/, '');
-        }
-
-        const parsedData = JSON.parse(cleanedJson);
+        const parsedData = JSON.parse(jsonText);
 
         for (const key of schemaKeys) {
             if (parsedData[key] === undefined) {
@@ -234,7 +155,7 @@ const parseAndValidateJSON = <T>(response: any, schemaKeys: (keyof T)[]): T => {
         console.error("JSON Parsing Error:", e.message);
         console.error("Raw Response Object:", response);
         console.error("Extracted Text:", responseText);
-        throw new Error(`AI response parsing failed. The AI might have returned an invalid format. Please try again.`);
+        throw new Error(`AI parse failed: ${e.message}`);
     }
 };
 
@@ -258,9 +179,8 @@ export const validateJobInput = async (jobRole: string, jobDescription: string):
     `;
 
     try {
-        const ai = getAIClient();
-        const response = await withRetry(() => ai.models.generateContent({
-            model: 'gemini-2.5-flash-lite',
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
             contents: prompt,
             config: {
                 systemInstruction,
@@ -268,13 +188,13 @@ export const validateJobInput = async (jobRole: string, jobDescription: string):
                 responseSchema: validationSchema,
                 temperature: 0.1,
             },
-        }));
+        });
 
         return parseAndValidateJSON<ValidationResult>(response, ['status', 'reason']);
 
     } catch (error) {
         console.error("Validation Error:", error);
-        return { status: 'valid', reason: "Automatic validation skipped due to service issues." };
+        return { status: 'valid', reason: "Automatic validation skipped." };
     }
 };
 
@@ -299,9 +219,8 @@ export const generateInterviewQuestions = async (jobRole: string, jobDescription
 
     try {
         console.log("Generating interview questions...");
-        const ai = getAIClient();
-        const response = await withRetry(() => ai.models.generateContent({
-            model: 'gemini-2.5-flash-lite',
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
             contents: prompt,
             config: {
                 systemInstruction,
@@ -309,13 +228,13 @@ export const generateInterviewQuestions = async (jobRole: string, jobDescription
                 responseSchema: interviewPrepSchema,
                 temperature: 0.7,
             },
-        }));
+        });
 
         return parseAndValidateJSON<InterviewPrepResult>(response, ['questions', 'companyName', 'approachGuide']);
 
     } catch (error: any) {
-        const userFriendlyMessage = formatApiError(error);
-        throw new Error(userFriendlyMessage);
+        console.error("Detailed Generation Error:", error);
+        throw new Error(error.message || "Could not generate interview questions. Please check your network or input.");
     }
 };
 
@@ -349,9 +268,8 @@ export const generateTechnicalSolution = async (
     }
 
     try {
-        const ai = getAIClient();
-        const response = await withRetry(() => ai.models.generateContent({
-            model: 'gemini-2.5-flash-lite',
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
             contents: content.parts[1] ? content : (content.parts[0]?.text || ""),
             config: {
                 systemInstruction,
@@ -359,21 +277,20 @@ export const generateTechnicalSolution = async (
                 responseSchema: technicalSolutionSchema,
                 temperature: 0.3,
             }
-        }));
-        return parseAndValidateJSON<TechnicalSolution>(response, ['explanation', 'code']);
-    } catch (error: any) {
-        const userFriendlyMessage = formatApiError(error);
-        throw new Error(userFriendlyMessage);
+        });
+        return parseAndValidateJSON<TechnicalSolution>(response.text, ['explanation', 'code']);
+    } catch (error) {
+        console.error("Error generating technical solution:", error);
+        throw new Error("The AI failed to generate a solution. Your request might have been blocked for safety reasons, or there could be a temporary network issue. Please review your problem description and try again.");
     }
 };
 
 export const transcribeAudio = async (audioFile: File): Promise<string> => {
     try {
         const audioPart = await fileToGenerativePart(audioFile);
-        const ai = getAIClient();
 
-        const response = await withRetry(() => ai.models.generateContent({
-            model: 'gemini-2.5-flash-lite',
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
             contents: [{
                 role: 'user',
                 parts: [
@@ -381,13 +298,13 @@ export const transcribeAudio = async (audioFile: File): Promise<string> => {
                     { text: "Transcribe this audio recording of a person answering an interview question. Provide only the text." }
                 ]
             }],
-        }));
+        });
 
         return response.text.trim();
 
-    } catch (error: any) {
-        const userFriendlyMessage = formatApiError(error);
-        throw new Error(userFriendlyMessage);
+    } catch (error) {
+        console.error("Error transcribing audio:", error);
+        throw new Error("Failed to transcribe your audio. The file might be in an unsupported format, or the AI service may be temporarily unavailable. Please try again.");
     }
 };
 
@@ -403,9 +320,8 @@ export const generateAnswerFeedback = async (question: string, answer: string, j
     `;
 
     try {
-        const ai = getAIClient();
-        const response = await withRetry(() => ai.models.generateContent({
-            model: 'gemini-2.5-flash-lite',
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
             contents: prompt,
             config: {
                 systemInstruction,
@@ -413,19 +329,18 @@ export const generateAnswerFeedback = async (question: string, answer: string, j
                 responseSchema: feedbackSchema,
                 temperature: 0.5,
             }
-        }));
-        return parseAndValidateJSON<StructuredFeedback>(response, ['clarity', 'structure', 'relevance', 'overallImpression', 'improvementPoints', 'followUpQuestion']);
-    } catch (error: any) {
-        const userFriendlyMessage = formatApiError(error);
-        throw new Error(userFriendlyMessage);
+        });
+        return parseAndValidateJSON<StructuredFeedback>(response.text, ['clarity', 'structure', 'relevance', 'overallImpression', 'improvementPoints', 'followUpQuestion']);
+    } catch (error) {
+        console.error("Error generating structured answer feedback:", error);
+        throw new Error("Failed to generate feedback for your answer. There might be a temporary issue with the AI service. Please try again.");
     }
 };
 
 export const textToSpeech = async (text: string): Promise<string> => {
     try {
-        const ai = getAIClient();
-        const response = await withRetry(() => ai.models.generateContent({
-            model: "gemini-2.5-flash-lite",
+        const response = await ai.models.generateContent({
+            model: "gemini-2.5-flash",
             contents: [{ parts: [{ text: `Read this interview question clearly and professionally: "${text}"` }] }],
             config: {
                 responseModalities: [Modality.AUDIO],
@@ -435,14 +350,14 @@ export const textToSpeech = async (text: string): Promise<string> => {
                     },
                 },
             },
-        }));
+        });
         const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
         if (!base64Audio) {
             throw new Error("No audio data received from API.");
         }
         return base64Audio;
-    } catch (error: any) {
-        const userFriendlyMessage = formatApiError(error);
-        throw new Error(userFriendlyMessage);
+    } catch (error) {
+        console.error("Error generating speech:", error);
+        throw new Error("Failed to generate audio for the question.");
     }
 };
